@@ -68,6 +68,7 @@
     "@types/better-sqlite3": "^7.6.11",
     "@types/node": "^22.10.5",
     "@types/turndown": "^5.0.6",
+    "confbox": "^0.1.8",
     "tsup": "^8.3.5",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"

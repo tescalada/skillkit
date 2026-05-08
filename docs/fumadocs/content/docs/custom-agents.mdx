@@ -47,9 +47,29 @@ triggers:
 ## Translation
 
 ```bash
+skillkit agent translate --source ./my-agent --to claude-code
+skillkit agent translate --source ./my-agent --to codex
 skillkit agent translate --source ./my-agent --to cursor
 skillkit agent translate --source ./agents --to cursor --recursive
 ```
+
+### Target output formats
+
+| Target | Path | File format |
+|---|---|---|
+| `claude-code` | `.claude/agents/<name>.md` | Markdown + YAML frontmatter |
+| `codex` | `.codex/agents/<name>.toml` | TOML — required `name`, `description`, `developer_instructions`; optional `model`, `sandbox_mode` |
+| `cursor` | `.cursor/agents/<name>.md` | Markdown |
+| `universal` | `agents/<name>.md` | Markdown (lossy — Claude-specific fields dropped) |
+
+When translating to `codex`, the canonical agent's body becomes
+`developer_instructions`. `permissionMode` maps to `sandbox_mode`:
+`default` and `plan` → `read-only`, `auto-edit` → `workspace-write`,
+`full-auto` and `bypassPermissions` → `danger-full-access`. When
+`permissionMode` is unset, `sandbox_mode` is omitted and Codex uses its
+default. Fields without a Codex equivalent (`hooks`, `context`,
+`disallowedTools`, `allowedTools`) are surfaced in `result.incompatible`
+and dropped from the output.
 
 ## Validation
 
