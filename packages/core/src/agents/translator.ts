@@ -65,6 +65,24 @@ export function translateCanonicalAgent(
     }
   }
 
+  if (targetFormat === 'codex-agent') {
+    // Codex does not support hooks, context, or per-tool allowlists
+    if (canonical.hooks && canonical.hooks.length > 0) {
+      incompatible.push('hooks (not supported in codex format)');
+    }
+    if (canonical.context) {
+      incompatible.push('context (not supported in codex format)');
+    }
+    if (canonical.disallowedTools && canonical.disallowedTools.length > 0) {
+      incompatible.push('disallowedTools (not supported in codex format)');
+    }
+    if (
+      (canonical.allowedTools && canonical.allowedTools.length > 0)
+    ) {
+      incompatible.push('allowedTools (not supported in codex format)');
+    }
+  }
+
   // Generate content based on target format
   let content: string;
 
@@ -74,6 +92,9 @@ export function translateCanonicalAgent(
       break;
     case 'cursor-agent':
       content = generateCursorAgent(canonical, options);
+      break;
+    case 'codex-agent':
+      content = generateCodexAgent(canonical, options);
       break;
     case 'universal':
       content = generateUniversalAgent(canonical, options);
@@ -353,6 +374,8 @@ export function getAgentFilename(
   switch (format) {
     case 'cursor-agent':
       return `${agentName}.md`; // Or .mdc if Cursor uses that for agents
+    case 'codex-agent':
+      return `${agentName}.toml`;
     default:
       return `${agentName}.md`;
   }
@@ -380,6 +403,85 @@ function escapeYamlString(str: string): string {
     return `"${str.replace(/"/g, '\\"').replace(/\n/g, '\\n')}"`;
   }
   return str;
+}
+
+/**
+ * Escape a string for use in a TOML basic string ("...").
+ * Escapes backslashes, double-quotes, and ASCII control characters.
+ */
+function escapeTomlBasic(str: string): string {
+  return str
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\x00/g, '\\u0000')
+    .replace(/[\x01-\x08]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`)
+    .replace(/\x0b/g, '\\u000b')
+    .replace(/\x0c/g, '\\f')
+    .replace(/[\x0e-\x1f]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`)
+    .replace(/\x7f/g, '\\u007f');
+}
+
+/**
+ * Format a string as a TOML multiline value.
+ * Prefers literal multiline ('''...''') which preserves content verbatim.
+ * Falls back to basic multiline ("""...""") with escaping if the content
+ * itself contains the literal triple-quote sequence.
+ */
+function formatTomlMultiline(str: string): string {
+  if (!str.includes("'''")) {
+    // Literal multiline: TOML parsers strip the first immediate newline after the opening delimiter
+    return `'''\n${str}'''`;
+  }
+  // Fall back to basic multiline; escape backslashes and double-quotes
+  const escaped = escapeTomlBasic(str)
+    .replace(/\n/g, '\n') // actual newlines are allowed in basic multiline strings
+    .replace(/"""/g, '\\"\\"\\"');
+  return `"""\n${escaped}"""`;
+}
+
+/**
+ * Generate OpenAI Codex agent format (TOML)
+ */
+function generateCodexAgent(
+  canonical: CanonicalAgent,
+  options?: AgentTranslationOptions
+): string {
+  const lines: string[] = [];
+
+  if (options?.addMetadata) {
+    lines.push(`# Translated by SkillKit from ${canonical.sourceAgent || 'unknown'}`);
+  }
+
+  lines.push(`name = "${escapeTomlBasic(canonical.name)}"`);
+  lines.push(`description = "${escapeTomlBasic(canonical.description)}"`);
+
+  if (canonical.model) {
+    lines.push(`model = "${escapeTomlBasic(canonical.model)}"`);
+  }
+
+  if (canonical.permissionMode) {
+    let sandboxMode: string;
+    switch (canonical.permissionMode) {
+      case 'default':
+      case 'plan':
+        sandboxMode = 'read-only';
+        break;
+      case 'auto-edit':
+        sandboxMode = 'workspace-write';
+        break;
+      case 'full-auto':
+      case 'bypassPermissions':
+        sandboxMode = 'danger-full-access';
+        break;
+      default:
+        sandboxMode = 'read-only';
+    }
+    lines.push(`sandbox_mode = "${sandboxMode}"`);
+  }
+
+  lines.push(`developer_instructions = ${formatTomlMultiline(canonical.content)}`);
+
+  return lines.join('\n') + '\n';
 }
 
 /**
@@ -423,6 +525,14 @@ export function isAgentCompatible(
   if (targetFormat === 'cursor-agent') {
     if (sourceFormat === 'claude-agent') {
       warnings.push('Some Claude-specific features may not translate perfectly');
+    }
+    return { compatible: true, warnings };
+  }
+
+  // Codex format loses hooks, context, and tool allowlists
+  if (targetFormat === 'codex-agent') {
+    if (sourceFormat === 'claude-agent') {
+      warnings.push('Hooks, context, allowedTools, and disallowedTools will be lost');
     }
     return { compatible: true, warnings };
   }

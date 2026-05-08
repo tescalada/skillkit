@@ -181,6 +181,7 @@ export interface CanonicalAgent {
 export type AgentFormatCategory =
   | 'claude-agent'    // Claude Code .claude/agents/*.md
   | 'cursor-agent'    // Cursor agent format (if different)
+  | 'codex-agent'     // OpenAI Codex .codex/agents/*.toml
   | 'universal';      // Universal agent format
 
 /**
@@ -334,7 +335,7 @@ export const ALL_AGENT_DISCOVERY_PATHS = [
 export const CUSTOM_AGENT_FORMAT_MAP: Record<AgentType, AgentFormatCategory> = {
   'claude-code': 'claude-agent',
   'cursor': 'cursor-agent',
-  'codex': 'claude-agent',
+  'codex': 'codex-agent',
   'gemini-cli': 'claude-agent',
   'opencode': 'claude-agent',
   'antigravity': 'claude-agent',
