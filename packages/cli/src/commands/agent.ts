@@ -7,7 +7,7 @@
 import { colors } from '../onboarding/index.js';
 import { Command, Option } from 'clipanion';
 import { existsSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
-import { join, basename } from 'node:path';
+import { join, basename, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
 import {
   findAllAgents,
@@ -47,12 +47,12 @@ import {
  *   ./path  /abs/path  ~/path  (local paths)
  */
 export function isRepoInput(name: string): boolean {
-  if (name.startsWith('gitlab:') || name.startsWith('bitbucket:')) return true;
-  if (isLocalPath(name)) return true;
-  // owner/repo — must contain exactly one slash with non-empty segments on
-  // both sides, and no spaces (rules out prose like "foo bar/baz").
-  const slashIdx = name.indexOf('/');
-  if (slashIdx > 0 && slashIdx < name.length - 1 && !name.includes(' ')) return true;
+  if (/\s/.test(name)) return false;
+  if (/^(gitlab|bitbucket):[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/.test(name)) return true;
+  if (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/.test(name)) return true;
+  if (/^\.{1,2}\//.test(name) || /^~\//.test(name)) return true;
+  if (isAbsolute(name)) return true;
+  if (/^[A-Za-z]:[\\/]/.test(name)) return true;
   return false;
 }
 
@@ -730,16 +730,19 @@ export class AgentInstallCommand extends Command {
   }
 
   private async installFromRepo(source: string): Promise<number> {
+    source = source.trim();
+
     // Resolve target runtime
     let targetAgent: AgentType;
     if (this.agentType) {
+      const agentTypeLower = this.agentType.trim().toLowerCase();
       const validTypes = getAllAdapters().map((a: { type: string }) => a.type);
-      if (!validTypes.includes(this.agentType)) {
-        console.log(colors.error(`Unknown agent type: ${this.agentType}`));
+      if (!validTypes.includes(agentTypeLower)) {
+        console.log(colors.error(`Unknown agent type: ${agentTypeLower}`));
         console.log(colors.muted(`Valid types: ${validTypes.join(', ')}`));
         return 1;
       }
-      targetAgent = this.agentType as AgentType;
+      targetAgent = agentTypeLower as AgentType;
     } else {
       targetAgent = await detectAgent();
     }
@@ -749,29 +752,36 @@ export class AgentInstallCommand extends Command {
     let repoPath: string;
     let tempClonePath: string | undefined;
 
+    // Strip trailing .git for owner/repo shorthand only (not for local paths)
+    const normalizedSource = localPath ? source : source.replace(/\.git$/, '');
+
     if (localPath) {
-      repoPath = source.startsWith('/') ? source : join(process.cwd(), source);
+      let expandedSource = source;
+      if (source.startsWith('~/')) {
+        expandedSource = join(homedir(), source.slice(2));
+      }
+      repoPath = isAbsolute(expandedSource) ? expandedSource : join(process.cwd(), expandedSource);
       if (!existsSync(repoPath)) {
         console.log(colors.error(`Path not found: ${repoPath}`));
         return 1;
       }
     } else {
-      const providerAdapter = detectProvider(source);
+      const providerAdapter = detectProvider(normalizedSource);
       if (!providerAdapter) {
-        console.log(colors.error(`Could not detect provider for: ${source}`));
+        console.log(colors.error(`Could not detect provider for: ${normalizedSource}`));
         return 1;
       }
       let cloneResult: { success: boolean; path?: string; tempRoot?: string; error?: string };
       try {
-        cloneResult = await providerAdapter.clone(source, '', { depth: 1 });
+        cloneResult = await providerAdapter.clone(normalizedSource, '', { depth: 1 });
       } catch (err) {
         const providerError = err instanceof Error ? err.message : String(err);
-        console.log(colors.error(`tried as repo: ${providerError}; not in bundled catalog`));
+        console.log(colors.error(`Failed to install agents from ${normalizedSource}: ${providerError}`));
         return 1;
       }
       if (!cloneResult.success || !cloneResult.path) {
         const providerError = cloneResult.error || 'Clone failed';
-        console.log(colors.error(`tried as repo: ${providerError}; not in bundled catalog`));
+        console.log(colors.error(`Failed to install agents from ${normalizedSource}: ${providerError}`));
         return 1;
       }
       repoPath = cloneResult.path;
@@ -805,7 +815,8 @@ export class AgentInstallCommand extends Command {
           const result = translateAgent(agent, targetAgent, { addMetadata: true });
 
           if (!result.success) {
-            console.log(colors.error(`  ✗ ${agent.name}: Translation failed`));
+            const detail = result.warnings.length > 0 ? result.warnings.join('; ') : 'Translation failed';
+            console.log(colors.error(`  ✗ ${agent.name}: ${detail}`));
             errorCount++;
             continue;
           }

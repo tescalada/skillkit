@@ -215,6 +215,9 @@ describe('AgentInstallCommand', () => {
         const cmd = await makeCommand({ name: sourceDir, agentType: 'codex' });
         const exitCode = await cmd.execute();
         expect(exitCode).toBe(0);
+        const codexAgentsDir = join(tempDir, '.codex', 'agents');
+        expect(existsSync(codexAgentsDir)).toBe(true);
+        expect(existsSync(join(codexAgentsDir, 'planner.md'))).toBe(true);
       } finally {
         cwdSpy.mockRestore();
       }
@@ -254,9 +257,134 @@ describe('AgentInstallCommand', () => {
       const exitCode = await cmd.execute();
       expect(exitCode).toBe(1);
       const logCalls = consoleLogSpy.mock.calls.flat().join(' ');
-      expect(logCalls).toMatch(/tried as repo/);
+      expect(logCalls).toMatch(/Failed to install agents from/);
 
       vi.doUnmock('@skillkit/core');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // GitLab and Bitbucket prefix happy paths
+  // -------------------------------------------------------------------------
+  describe('gitlab: and bitbucket: prefix happy paths', () => {
+    it('installs agents from gitlab: prefix repo', async () => {
+      const clonedDir = mkdtempSync(join(tmpdir(), 'gitlab-clone-'));
+      writeFileSync(
+        join(clonedDir, 'agent.md'),
+        '---\nname: agent\ndescription: Test\n---\n\nBody.\n',
+      );
+      const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(tempDir);
+      try {
+        vi.resetModules();
+        vi.doMock('@skillkit/core', async (importOriginal) => {
+          const actual = await importOriginal<typeof import('@skillkit/core')>();
+          return {
+            ...actual,
+            detectProvider: () => ({
+              name: 'GitLab',
+              type: 'gitlab',
+              matches: () => true,
+              parseSource: () => ({ owner: 'owner', repo: 'repo' }),
+              clone: async () => ({ success: true, path: clonedDir, tempRoot: clonedDir }),
+            }),
+            isLocalPath: actual.isLocalPath,
+          };
+        });
+        const { AgentInstallCommand } = await import('../agent.js');
+        const cmd = Object.assign(new AgentInstallCommand(), {
+          global: false, force: false, all: false, agentType: 'claude-code',
+          name: 'gitlab:owner/repo',
+        });
+        const exitCode = await cmd.execute();
+        expect(exitCode).toBe(0);
+        expect(existsSync(join(tempDir, '.claude', 'agents', 'agent.md'))).toBe(true);
+      } finally {
+        cwdSpy.mockRestore();
+        vi.doUnmock('@skillkit/core');
+        vi.resetModules();
+        rmSync(clonedDir, { recursive: true, force: true });
+      }
+    });
+
+    it('installs agents from bitbucket: prefix repo', async () => {
+      const clonedDir = mkdtempSync(join(tmpdir(), 'bitbucket-clone-'));
+      writeFileSync(
+        join(clonedDir, 'agent.md'),
+        '---\nname: agent\ndescription: Test\n---\n\nBody.\n',
+      );
+      const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(tempDir);
+      try {
+        vi.resetModules();
+        vi.doMock('@skillkit/core', async (importOriginal) => {
+          const actual = await importOriginal<typeof import('@skillkit/core')>();
+          return {
+            ...actual,
+            detectProvider: () => ({
+              name: 'Bitbucket',
+              type: 'bitbucket',
+              matches: () => true,
+              parseSource: () => ({ owner: 'owner', repo: 'repo' }),
+              clone: async () => ({ success: true, path: clonedDir, tempRoot: clonedDir }),
+            }),
+            isLocalPath: actual.isLocalPath,
+          };
+        });
+        const { AgentInstallCommand } = await import('../agent.js');
+        const cmd = Object.assign(new AgentInstallCommand(), {
+          global: false, force: false, all: false, agentType: 'claude-code',
+          name: 'bitbucket:owner/repo',
+        });
+        const exitCode = await cmd.execute();
+        expect(exitCode).toBe(0);
+        expect(existsSync(join(tempDir, '.claude', 'agents', 'agent.md'))).toBe(true);
+      } finally {
+        cwdSpy.mockRestore();
+        vi.doUnmock('@skillkit/core');
+        vi.resetModules();
+        rmSync(clonedDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Clone success but empty repo (no agent files)
+  // -------------------------------------------------------------------------
+  describe('clone success but no agents found', () => {
+    it('returns 0 and logs a warning when cloned repo has no agent files', async () => {
+      const clonedDir = mkdtempSync(join(tmpdir(), 'empty-clone-'));
+      // No .md files placed in clonedDir
+      const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(tempDir);
+      try {
+        vi.resetModules();
+        vi.doMock('@skillkit/core', async (importOriginal) => {
+          const actual = await importOriginal<typeof import('@skillkit/core')>();
+          return {
+            ...actual,
+            detectProvider: () => ({
+              name: 'GitHub',
+              type: 'github',
+              matches: () => true,
+              parseSource: () => ({ owner: 'some-org', repo: 'empty-repo' }),
+              clone: async () => ({ success: true, path: clonedDir, tempRoot: clonedDir }),
+            }),
+            isLocalPath: actual.isLocalPath,
+          };
+        });
+        const { AgentInstallCommand } = await import('../agent.js');
+        const cmd = Object.assign(new AgentInstallCommand(), {
+          global: false, force: false, all: false, agentType: 'claude-code',
+          name: 'some-org/empty-repo',
+        });
+        const exitCode = await cmd.execute();
+        expect(exitCode).toBe(0);
+        const logCalls = consoleLogSpy.mock.calls.flat().join(' ');
+        expect(logCalls).toMatch(/No agents found/);
+      } finally {
+        cwdSpy.mockRestore();
+        vi.doUnmock('@skillkit/core');
+        vi.resetModules();
+        rmSync(clonedDir, { recursive: true, force: true });
+      }
     });
   });
 
@@ -278,9 +406,11 @@ describe('AgentInstallCommand', () => {
 
     it('install --all proceeds without name (existing behavior)', async () => {
       const cmd = await makeCommand({ all: true });
-      // getBundledAgents may return empty in test env, should still return 0
+      // Bundled templates resolve from dist path in test env and cannot be found,
+      // so installAll returns 1 (errorCount > 0). This is the actually-expected
+      // exit code; the assertion proves no crash and the correct error path.
       const exitCode = await cmd.execute();
-      expect([0, 1]).toContain(exitCode); // just verifies no crash
+      expect(exitCode).toBe(1);
     });
   });
 });
