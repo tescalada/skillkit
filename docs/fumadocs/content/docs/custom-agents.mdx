@@ -13,10 +13,39 @@ Create and manage custom AI sub-agents.
 skillkit agent list              # List agents
 skillkit agent show <name>       # Show details
 skillkit agent create <name>     # Create agent
+skillkit agent install <name>    # Install bundled template or from repo
 skillkit agent translate         # Translate format
 skillkit agent sync              # Sync to target
 skillkit agent validate          # Validate
 ```
+
+## Install
+
+`skillkit agent install` accepts a bundled template name, a github/gitlab/bitbucket
+repo identifier, or a local path:
+
+```bash
+# Bundled template from @skillkit/resources
+skillkit agent install code-reviewer
+
+# Github repo containing agents in agents/ or .claude/agents/
+skillkit agent install owner/repo
+
+# Other forges
+skillkit agent install gitlab:owner/repo
+skillkit agent install bitbucket:owner/repo
+
+# Local path (with ~/ expansion and absolute-path support)
+skillkit agent install ~/src/my-agents
+skillkit agent install ./agents
+
+# Override the target runtime (default: auto-detect)
+skillkit agent install owner/repo --agent codex
+```
+
+Agents inside the source are discovered from any path in `ALL_AGENT_DISCOVERY_PATHS`
+(`agents/`, `.claude/agents/`, `.codex/agents/`, etc.). Top-level files like
+`README.md` and `CONTRIBUTING.md` are intentionally not treated as agents.
 
 ## Agent Definition
 

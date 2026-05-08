@@ -6,8 +6,8 @@
 
 import { colors } from '../onboarding/index.js';
 import { Command, Option } from 'clipanion';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join, basename } from 'node:path';
+import { existsSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { join, basename, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
 import {
   findAllAgents,
@@ -20,12 +20,15 @@ import {
   discoverSkills,
   readSkillContent,
   generateSubagentFromSkill,
+  detectProvider,
+  isLocalPath,
   type CustomAgent,
   type AgentType,
   type Skill,
   type AgentPermissionMode,
   type SkillToSubagentOptions,
 } from '@skillkit/core';
+import { detectAgent, getAllAdapters } from '@skillkit/agents';
 import {
   getBundledAgents,
   getBundledAgent,
@@ -34,6 +37,24 @@ import {
   isAgentInstalled,
   type BundledAgent,
 } from '@skillkit/resources';
+
+/**
+ * Returns true when `name` looks like a repo identifier rather than a
+ * bundled-template name.  Matches:
+ *   owner/repo           (GitHub shorthand)
+ *   gitlab:owner/repo
+ *   bitbucket:owner/repo
+ *   ./path  /abs/path  ~/path  (local paths)
+ */
+export function isRepoInput(name: string): boolean {
+  if (/\s/.test(name)) return false;
+  if (/^(gitlab|bitbucket):[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/.test(name)) return true;
+  if (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/.test(name)) return true;
+  if (/^\.{1,2}\//.test(name) || /^~\//.test(name)) return true;
+  if (isAbsolute(name)) return true;
+  if (/^[A-Za-z]:[\\/]/.test(name)) return true;
+  return false;
+}
 
 export class AgentCommand extends Command {
   static override paths = [['agent']];
@@ -665,6 +686,10 @@ export class AgentInstallCommand extends Command {
     description: 'Install all bundled agents',
   });
 
+  agentType = Option.String('--agent', {
+    description: 'Target runtime for translation (e.g. codex, cursor). Auto-detected if not specified.',
+  });
+
   async execute(): Promise<number> {
     if (this.all) {
       return this.installAll();
@@ -674,6 +699,10 @@ export class AgentInstallCommand extends Command {
       console.log(colors.warning('Please specify an agent name or use --all'));
       console.log(colors.muted('Run `skillkit agent available` to see available agents'));
       return 1;
+    }
+
+    if (isRepoInput(this.name)) {
+      return this.installFromRepo(this.name);
     }
 
     const agent = getBundledAgent(this.name);
@@ -698,6 +727,129 @@ export class AgentInstallCommand extends Command {
     }
 
     return 0;
+  }
+
+  private async installFromRepo(source: string): Promise<number> {
+    source = source.trim();
+
+    // Resolve target runtime
+    let targetAgent: AgentType;
+    if (this.agentType) {
+      const agentTypeLower = this.agentType.trim().toLowerCase();
+      const validTypes = getAllAdapters().map((a: { type: string }) => a.type);
+      if (!validTypes.includes(agentTypeLower)) {
+        console.log(colors.error(`Unknown agent type: ${agentTypeLower}`));
+        console.log(colors.muted(`Valid types: ${validTypes.join(', ')}`));
+        return 1;
+      }
+      targetAgent = agentTypeLower as AgentType;
+    } else {
+      targetAgent = await detectAgent();
+    }
+
+    // Resolve path: local or cloned remote
+    const localPath = isLocalPath(source);
+    let repoPath: string;
+    let tempClonePath: string | undefined;
+
+    // Strip trailing .git for owner/repo shorthand only (not for local paths)
+    const normalizedSource = localPath ? source : source.replace(/\.git$/, '');
+
+    if (localPath) {
+      let expandedSource = source;
+      if (source.startsWith('~/')) {
+        expandedSource = join(homedir(), source.slice(2));
+      }
+      repoPath = isAbsolute(expandedSource) ? expandedSource : join(process.cwd(), expandedSource);
+      if (!existsSync(repoPath)) {
+        console.log(colors.error(`Path not found: ${repoPath}`));
+        return 1;
+      }
+    } else {
+      const providerAdapter = detectProvider(normalizedSource);
+      if (!providerAdapter) {
+        console.log(colors.error(`Could not detect provider for: ${normalizedSource}`));
+        return 1;
+      }
+      let cloneResult: { success: boolean; path?: string; tempRoot?: string; error?: string };
+      try {
+        cloneResult = await providerAdapter.clone(normalizedSource, '', { depth: 1 });
+      } catch (err) {
+        const providerError = err instanceof Error ? err.message : String(err);
+        console.log(colors.error(`Failed to install agents from ${normalizedSource}: ${providerError}`));
+        return 1;
+      }
+      if (!cloneResult.success || !cloneResult.path) {
+        const providerError = cloneResult.error || 'Clone failed';
+        console.log(colors.error(`Failed to install agents from ${normalizedSource}: ${providerError}`));
+        return 1;
+      }
+      repoPath = cloneResult.path;
+      tempClonePath = cloneResult.tempRoot || cloneResult.path;
+    }
+
+    try {
+      // Use the project-style discovery that walks only known agent paths
+      // (.claude/agents, agents/, .codex/agents, etc.). Recursive .md scanning
+      // would pick up README.md and other top-level docs as "agents".
+      const agents = discoverAgents(repoPath);
+
+      if (agents.length === 0) {
+        console.log(colors.warning(`No agents found in ${source}`));
+        return 0;
+      }
+
+      const outputDir = this.global
+        ? getAgentTargetDirectory(homedir(), targetAgent)
+        : getAgentTargetDirectory(process.cwd(), targetAgent);
+
+      if (!existsSync(outputDir)) {
+        mkdirSync(outputDir, { recursive: true });
+      }
+
+      let successCount = 0;
+      let skipCount = 0;
+      let errorCount = 0;
+
+      console.log(colors.cyan(`Installing ${agents.length} agent(s) from ${source} to ${targetAgent}...\n`));
+
+      for (const agent of agents) {
+        try {
+          const result = translateAgent(agent, targetAgent, { addMetadata: true });
+
+          if (!result.success) {
+            const detail = result.warnings.length > 0 ? result.warnings.join('; ') : 'Translation failed';
+            console.log(colors.error(`  ✗ ${agent.name}: ${detail}`));
+            errorCount++;
+            continue;
+          }
+
+          const outputPath = join(outputDir, result.filename);
+
+          if (existsSync(outputPath) && !this.force) {
+            console.log(colors.warning(`  ○ ${agent.name} already exists at ${outputPath} (use --force to overwrite)`));
+            skipCount++;
+            continue;
+          }
+
+          writeFileSync(outputPath, result.content);
+          console.log(colors.success(`  ✓ ${agent.name} → ${outputPath}`));
+          successCount++;
+        } catch (err) {
+          console.log(colors.error(`  ✗ ${agent.name}: ${err instanceof Error ? err.message : 'Unknown error'}`));
+          errorCount++;
+        }
+      }
+
+      console.log();
+      console.log(colors.muted(`Installed: ${successCount}, Skipped: ${skipCount}, Errors: ${errorCount}`));
+
+      return errorCount > 0 ? 1 : 0;
+    } finally {
+      if (!localPath && tempClonePath && existsSync(tempClonePath)) {
+        rmSync(tempClonePath, { recursive: true, force: true });
+      }
+    }
   }
 
   private async installAll(): Promise<number> {

@@ -304,11 +304,25 @@ skillkit translate <skill> --to <agent> --dry-run
 skillkit agent list                              # List agents
 skillkit agent show <name>                       # Show details
 skillkit agent create <name>                     # Create agent
+skillkit agent install <name>                    # Install bundled template
+skillkit agent install <owner>/<repo>            # Install from github repo
+skillkit agent install gitlab:<owner>/<repo>     # Install from gitlab repo
+skillkit agent install ./local/agents            # Install from local path
+skillkit agent install <source> --agent <type>   # Override target runtime
 skillkit agent translate --source ./path --to cursor
 skillkit agent translate --source ./path --to cursor --recursive
 skillkit agent sync                              # Sync to target
 skillkit agent validate                          # Validate definitions
 ```
+
+### `agent install`
+
+Resolves the argument in this order:
+
+1. If the input matches `owner/repo`, `gitlab:owner/repo`, `bitbucket:owner/repo`, or a local path (`./...`, `~/...`, absolute, or Windows-drive), clone (or read locally) and discover agents under any path in `ALL_AGENT_DISCOVERY_PATHS` (`agents/`, `.claude/agents/`, `.codex/agents/`, etc.). Top-level files like `README.md` are not picked up.
+2. Otherwise, look up the name in the `@skillkit/resources` bundled-template catalog (`code-reviewer`, `architect`, `tdd-guide`, …).
+
+By default, agents are translated to whichever runtime `detectAgent()` infers from the project. Override with `--agent <type>` (e.g. `--agent claude-code`, `--agent codex`).
 
 ## Context Commands
 
