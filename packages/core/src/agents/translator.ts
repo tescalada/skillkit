@@ -413,6 +413,10 @@ function escapeTomlBasic(str: string): string {
   return str
     .replace(/\\/g, '\\\\')
     .replace(/"/g, '\\"')
+    // Escape whitespace control chars before the general control-char loop
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r')
+    .replace(/\t/g, '\\t')
     .replace(/\x00/g, '\\u0000')
     .replace(/[\x01-\x08]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`)
     .replace(/\x0b/g, '\\u000b')
@@ -428,14 +432,17 @@ function escapeTomlBasic(str: string): string {
  * itself contains the literal triple-quote sequence.
  */
 function formatTomlMultiline(str: string): string {
-  if (!str.includes("'''")) {
+  // Fall back to basic multiline if the body can't be embedded safely in a literal multiline.
+  // Conditions: contains ''' delimiter, ends with ' (would close the delimiter prematurely),
+  // or contains raw control characters that literal strings must not contain (except \t, \n, \r).
+  const hasRawControlChar = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(str);
+  if (!str.includes("'''") && !str.endsWith("'") && !hasRawControlChar) {
     // Literal multiline: TOML parsers strip the first immediate newline after the opening delimiter
     return `'''\n${str}'''`;
   }
   // Fall back to basic multiline; escape backslashes and double-quotes
-  const escaped = escapeTomlBasic(str)
-    .replace(/\n/g, '\n') // actual newlines are allowed in basic multiline strings
-    .replace(/"""/g, '\\"\\"\\"');
+  // (escapeTomlBasic has already escaped '"' to '\"', so no triple-quote literal can appear)
+  const escaped = escapeTomlBasic(str);
   return `"""\n${escaped}"""`;
 }
 
@@ -531,8 +538,9 @@ export function isAgentCompatible(
 
   // Codex format loses hooks, context, and tool allowlists
   if (targetFormat === 'codex-agent') {
+    // isAgentCompatible doesn't have canonical data; note the fields that codex can't represent
     if (sourceFormat === 'claude-agent') {
-      warnings.push('Hooks, context, allowedTools, and disallowedTools will be lost');
+      warnings.push('Hooks, context, allowedTools, and disallowedTools will be lost if present');
     }
     return { compatible: true, warnings };
   }

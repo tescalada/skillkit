@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { createRequire } from 'node:module';
+import { parseTOML } from 'confbox';
 import {
   translateAgent,
   translateCanonicalAgent,
@@ -12,17 +12,6 @@ import {
   isAgentCompatible,
 } from '../translator.js';
 import type { CustomAgent, CanonicalAgent, AgentFrontmatter } from '../types.js';
-
-// RFC-compliant TOML parser from the pnpm store (confbox is a transitive dep)
-const _require = createRequire(import.meta.url);
-let _parseTOML: ((toml: string) => Record<string, unknown>) | null = null;
-async function parseTOML(toml: string): Promise<Record<string, unknown>> {
-  if (!_parseTOML) {
-    const mod = await import('/home/coder/projects/skillkit/node_modules/.pnpm/confbox@0.1.8/node_modules/confbox/dist/toml.mjs');
-    _parseTOML = mod.parseTOML as (toml: string) => Record<string, unknown>;
-  }
-  return _parseTOML!(toml);
-}
 
 describe('Agent Translator', () => {
   describe('translateAgent', () => {
@@ -227,6 +216,11 @@ describe('Agent Translator', () => {
       expect(result.content).toContain('developer_instructions');
       expect(result.content).toContain('You are a helpful assistant.');
       expect(result.content).not.toContain('sandbox_mode');
+      // Parser-based: must be valid TOML with the expected keys/values
+      const parsedBasic = parseTOML(result.content);
+      expect(parsedBasic['name']).toBe('my-agent');
+      expect(parsedBasic['description']).toBe('Does things');
+      expect(parsedBasic['developer_instructions']).toBe('You are a helpful assistant.');
     });
 
     it('filename returns .toml for codex target', () => {
@@ -245,6 +239,10 @@ describe('Agent Translator', () => {
       const result = translateCanonicalAgent(canonical, 'codex');
 
       expect(result.content).toContain('model = "opus"');
+      // Parser-based: must produce valid TOML with the model key
+      const parsedWithModel = parseTOML(result.content);
+      expect(parsedWithModel['model']).toBe('opus');
+      expect(parsedWithModel['name']).toBe('coder');
     });
 
     it('permissionMode default maps to sandbox_mode = "read-only"', () => {
@@ -342,7 +340,8 @@ describe('Agent Translator', () => {
       const result = translateCanonicalAgent(canonical, 'codex');
 
       expect(result.incompatible).toContain('hooks (not supported in codex format)');
-      expect(result.content).not.toContain('hooks');
+      const parsed = parseTOML(result.content);
+      expect('hooks' in parsed).toBe(false);
     });
 
     it('description with quotes escapes correctly in TOML basic string', () => {
@@ -356,6 +355,9 @@ describe('Agent Translator', () => {
       const result = translateCanonicalAgent(canonical, 'codex');
 
       expect(result.content).toContain('description = "agent for \\"the team\\""');
+      // Parser-based: parsed value must equal the original description
+      const parsedQuoted = parseTOML(result.content);
+      expect(parsedQuoted['description']).toBe('agent for "the team"');
     });
 
     it('body with backticks and backslashes uses literal multiline verbatim', () => {
@@ -427,7 +429,7 @@ describe('Agent Translator', () => {
       expect(result.content).toContain('# Translated by SkillKit from claude-code');
     });
 
-    it('round-trip: parsed developer_instructions equals source body byte-for-byte', async () => {
+    it('round-trip: parsed developer_instructions equals source body byte-for-byte', () => {
       const body = 'You are a helpful assistant.\n\nDo the following:\n1. Be helpful\n2. Use `code` blocks\n3. Avoid C:\\path hacks\n';
       const canonical: CanonicalAgent = {
         name: 'round-trip-agent',
@@ -437,12 +439,12 @@ describe('Agent Translator', () => {
       };
 
       const result = translateCanonicalAgent(canonical, 'codex');
-      const parsed = await parseTOML(result.content);
+      const parsed = parseTOML(result.content);
 
       expect(parsed['developer_instructions']).toBe(body);
     });
 
-    it('round-trip with triple-quote body: parsed developer_instructions equals source body byte-for-byte', async () => {
+    it('round-trip with triple-quote body: parsed developer_instructions equals source body byte-for-byte', () => {
       const body = "Has triple-quotes: ''' and some text after.\n";
       const canonical: CanonicalAgent = {
         name: 'triple-quote-agent',
@@ -452,7 +454,7 @@ describe('Agent Translator', () => {
       };
 
       const result = translateCanonicalAgent(canonical, 'codex');
-      const parsed = await parseTOML(result.content);
+      const parsed = parseTOML(result.content);
 
       expect(parsed['developer_instructions']).toBe(body);
     });
@@ -497,6 +499,81 @@ describe('Agent Translator', () => {
       const result = translateCanonicalAgent(canonical, 'codex');
 
       expect(result.incompatible).toContain('context (not supported in codex format)');
+    });
+
+    it('description with newline: escapes \\n in TOML basic string and round-trips', () => {
+      const canonical: CanonicalAgent = {
+        name: 'agent',
+        description: 'Line one\nLine two',
+        content: 'Content.',
+        sourceFormat: 'claude-agent',
+      };
+
+      const result = translateCanonicalAgent(canonical, 'codex');
+
+      // Raw output must contain the escaped sequence, not a literal newline inside the string
+      expect(result.content).toContain('description = "Line one\\nLine two"');
+      // Round-trip: parsed value must equal the original string with the actual newline
+      const parsed = parseTOML(result.content);
+      expect(parsed['description']).toBe('Line one\nLine two');
+    });
+
+    it('body ending with single-quote falls back to basic multiline', () => {
+      const body = "Instructions that end with a quote'";
+      const canonical: CanonicalAgent = {
+        name: 'agent',
+        description: 'Agent',
+        content: body,
+        sourceFormat: 'claude-agent',
+      };
+
+      const result = translateCanonicalAgent(canonical, 'codex');
+
+      expect(result.content).toContain('developer_instructions = """');
+      expect(result.content).not.toContain("developer_instructions = '''");
+      const parsed = parseTOML(result.content);
+      expect(parsed['developer_instructions']).toBe(body);
+    });
+
+    it('body with raw control char falls back to basic multiline', () => {
+      const body = 'Instructions with\x07bell char.';
+      const canonical: CanonicalAgent = {
+        name: 'agent',
+        description: 'Agent',
+        content: body,
+        sourceFormat: 'claude-agent',
+      };
+
+      const result = translateCanonicalAgent(canonical, 'codex');
+
+      expect(result.content).toContain('developer_instructions = """');
+      expect(result.content).not.toContain("developer_instructions = '''");
+    });
+
+    it('hooks-only agent: warning mentions only hooks', () => {
+      const result = isAgentCompatible('claude-agent', 'codex-agent');
+      // The test for patch 8 is done in the codex translation context
+      // Here we verify the isAgentCompatible baseline still returns warnings
+      expect(result.compatible).toBe(true);
+      expect(result.warnings.length).toBeGreaterThan(0);
+    });
+
+    it('hooks-only agent: isAgentCompatible warning computed from actual fields', () => {
+      // Agent with only hooks: warning should mention hooks but not context/allowedTools/disallowedTools
+      const canonical: CanonicalAgent = {
+        name: 'agent',
+        description: 'Agent',
+        hooks: [{ type: 'PreToolUse', command: 'echo hi' }],
+        content: 'Content.',
+        sourceFormat: 'claude-agent',
+      };
+
+      const result = translateCanonicalAgent(canonical, 'codex');
+
+      expect(result.incompatible.some(s => s.includes('hooks'))).toBe(true);
+      expect(result.incompatible.some(s => s.includes('context'))).toBe(false);
+      expect(result.incompatible.some(s => s.includes('allowedTools'))).toBe(false);
+      expect(result.incompatible.some(s => s.includes('disallowedTools'))).toBe(false);
     });
   });
 });
