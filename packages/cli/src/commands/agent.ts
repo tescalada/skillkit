@@ -789,7 +789,10 @@ export class AgentInstallCommand extends Command {
     }
 
     try {
-      const agents = discoverAgentsFromPath(repoPath, true);
+      // Use the project-style discovery that walks only known agent paths
+      // (.claude/agents, agents/, .codex/agents, etc.). Recursive .md scanning
+      // would pick up README.md and other top-level docs as "agents".
+      const agents = discoverAgents(repoPath);
 
       if (agents.length === 0) {
         console.log(colors.warning(`No agents found in ${source}`));

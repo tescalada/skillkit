@@ -76,10 +76,15 @@ describe('AgentInstallCommand', () => {
     }
   });
 
-  // Helper: create a minimal agent .md file in sourceDir
+  // Helper: create a minimal agent .md file under <dir>/agents/, which is one
+  // of the recognized AGENT_DISCOVERY_PATHS. Files at the root of <dir> are
+  // intentionally NOT picked up (so README.md, CONTRIBUTING.md, etc. don't
+  // get treated as agents).
   function createAgentFile(name: string, dir: string = sourceDir): void {
+    const agentsDir = join(dir, 'agents');
+    mkdirSync(agentsDir, { recursive: true });
     writeFileSync(
-      join(dir, `${name}.md`),
+      join(agentsDir, `${name}.md`),
       `---\nname: ${name}\ndescription: Test agent\n---\n\nAgent body.\n`,
     );
   }
@@ -125,6 +130,35 @@ describe('AgentInstallCommand', () => {
         for (const f of files) {
           expect(existsSync(join(outputDir, f))).toBe(true);
         }
+      } finally {
+        cwdSpy.mockRestore();
+      }
+    });
+
+    it('ignores README.md and other top-level .md files at the repo root', async () => {
+      // Regression: scanning the entire path recursively would treat any .md
+      // file (README.md, CONTRIBUTING.md) as an agent. discoverAgents must
+      // restrict scanning to known paths like agents/ or .claude/agents/.
+      writeFileSync(
+        join(sourceDir, 'README.md'),
+        '# A Project\n\nThis is the README, not an agent.\n',
+      );
+      writeFileSync(
+        join(sourceDir, 'CONTRIBUTING.md'),
+        '# Contributing\n\nGuidelines.\n',
+      );
+      createAgentFile('planner');
+
+      const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(tempDir);
+      try {
+        const cmd = await makeCommand({ name: sourceDir, agentType: 'claude-code' });
+        const exitCode = await cmd.execute();
+        expect(exitCode).toBe(0);
+
+        const outputDir = join(tempDir, '.claude', 'agents');
+        expect(existsSync(join(outputDir, 'planner.md'))).toBe(true);
+        expect(existsSync(join(outputDir, 'README.md'))).toBe(false);
+        expect(existsSync(join(outputDir, 'CONTRIBUTING.md'))).toBe(false);
       } finally {
         cwdSpy.mockRestore();
       }
@@ -269,8 +303,9 @@ describe('AgentInstallCommand', () => {
   describe('gitlab: and bitbucket: prefix happy paths', () => {
     it('installs agents from gitlab: prefix repo', async () => {
       const clonedDir = mkdtempSync(join(tmpdir(), 'gitlab-clone-'));
+      mkdirSync(join(clonedDir, 'agents'), { recursive: true });
       writeFileSync(
-        join(clonedDir, 'agent.md'),
+        join(clonedDir, 'agents', 'agent.md'),
         '---\nname: agent\ndescription: Test\n---\n\nBody.\n',
       );
       const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(tempDir);
@@ -308,8 +343,9 @@ describe('AgentInstallCommand', () => {
 
     it('installs agents from bitbucket: prefix repo', async () => {
       const clonedDir = mkdtempSync(join(tmpdir(), 'bitbucket-clone-'));
+      mkdirSync(join(clonedDir, 'agents'), { recursive: true });
       writeFileSync(
-        join(clonedDir, 'agent.md'),
+        join(clonedDir, 'agents', 'agent.md'),
         '---\nname: agent\ndescription: Test\n---\n\nBody.\n',
       );
       const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(tempDir);
